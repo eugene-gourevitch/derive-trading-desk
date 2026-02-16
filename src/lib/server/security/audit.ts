@@ -8,7 +8,8 @@ export type AuditAction =
   | "onboarding_retry"
   | "onboarding_completed"
   | "onboarding_failed"
-  | "signer_invoked";
+  | "signer_invoked"
+  | "auth_verify_failed";
 
 export function auditLog(
   action: AuditAction,

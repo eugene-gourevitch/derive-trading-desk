@@ -7,6 +7,7 @@ import { encodeAbiParameters, keccak256 } from "viem";
 import type { Hex } from "viem";
 import { getProtocolConstants } from "./protocol-constants";
 import type { DeriveEnvironment } from "./constants";
+import { secureRandomInt } from "@/lib/utils/secure-random";
 
 const DEPOSIT_DATA_PARAMS = [
   { name: "amount", type: "uint256" },
@@ -175,5 +176,5 @@ export function getSignatureExpirySec(): number {
 }
 
 export function generateActionNonce(): number {
-  return Date.now() * 1000 + Math.floor(Math.random() * 1000);
+  return Date.now() * 1000 + secureRandomInt(1000);
 }

@@ -8,6 +8,7 @@ import type { DeriveEnvironment } from "@/lib/derive/constants";
 import { BackendDeriveClient } from "@/lib/server/derive/client";
 import { encodeDepositDataHashed, getCreateSubaccountTypedDataHash } from "@/lib/server/derive/action-encoding";
 import type { ICustodialSigner } from "@/lib/server/signer/types";
+import { secureRandomInt, secureRandomHex } from "@/lib/utils/secure-random";
 import {
   getOnboarding,
   setOnboarding,
@@ -25,7 +26,7 @@ const POLL_MAX_ATTEMPTS = 60; // ~3 min
 
 function generateNonce(): number {
   const ms = Date.now();
-  const r = Math.floor(Math.random() * 1000);
+  const r = secureRandomInt(1000);
   return ms * 1000 + r;
 }
 
@@ -159,7 +160,7 @@ export async function startOnboarding(
   signer: ICustodialSigner,
   env: DeriveEnvironment = "mainnet"
 ): Promise<OnboardingRecord> {
-  const id = `ob-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const id = `ob-${Date.now()}-${secureRandomHex(4)}`;
   const now = new Date().toISOString();
   const record: OnboardingRecord = {
     id,

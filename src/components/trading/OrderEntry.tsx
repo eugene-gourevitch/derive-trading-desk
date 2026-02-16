@@ -16,6 +16,7 @@ import {
   getSignatureExpirySec,
   signOrderMessage,
 } from "@/lib/derive/order-signing";
+import { getWalletErrorMessage } from "@/lib/utils/wallet-errors";
 import { toast } from "sonner";
 import type { OrderSide, OrderType, TimeInForce } from "@/lib/derive/types";
 
@@ -96,7 +97,7 @@ export function OrderEntry() {
       toast.success("Order submitted");
       refetchPrivateData(activeSubaccountId);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Order failed";
+      const { message } = getWalletErrorMessage(err, "Order failed. Please try again.");
       toast.error(message);
     } finally {
       setIsSubmitting(false);

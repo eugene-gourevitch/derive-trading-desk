@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getEnvSigner } from "@/lib/server/signer";
+import { getOnboardingSigner } from "@/lib/server/signer";
 import { startOnboarding, recordToStatus } from "@/lib/server/onboarding";
 import { checkRateLimit, auditLog } from "@/lib/server/security";
 import type { DeriveEnvironment } from "@/lib/derive/constants";
 
 export async function POST(request: NextRequest) {
-  const limit = checkRateLimit(request);
+  const limit = await checkRateLimit(request);
   if (!limit.ok) {
     return NextResponse.json(
       { error: "Too many requests", retryAfter: limit.retryAfter },
@@ -13,10 +13,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const signer = getEnvSigner();
+  const signer = getOnboardingSigner();
   if (!signer) {
     return NextResponse.json(
-      { error: "Onboarding signer not configured (ONBOARDING_SIGNER_PRIVATE_KEY)" },
+      { error: "Onboarding signer not configured (set ONBOARDING_SIGNER_PRIVATE_KEY or KMS)" },
       { status: 503 }
     );
   }

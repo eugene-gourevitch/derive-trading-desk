@@ -11,6 +11,7 @@ import { getWithdrawTypedData, getSignatureExpirySec, generateActionNonce } from
 import { deriveClient } from "@/lib/derive/client";
 import { formatPrice } from "@/lib/utils/formatting";
 import { cn } from "@/lib/utils/cn";
+import { getWalletErrorMessage } from "@/lib/utils/wallet-errors";
 
 const POLL_WITHDRAW_MS = 3000;
 const POLL_WITHDRAW_ATTEMPTS = 40;
@@ -122,7 +123,8 @@ export function WithdrawPanel() {
       setAmount("");
     } catch (err) {
       setTxStatus("error");
-      setErrorMsg(err instanceof Error ? err.message : "Withdrawal failed");
+      const { message } = getWalletErrorMessage(err, "Withdrawal failed. Please try again.");
+      setErrorMsg(message);
     } finally {
       setIsWithdrawing(false);
     }

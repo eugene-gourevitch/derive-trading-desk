@@ -1,6 +1,6 @@
 /**
- * Simple in-memory rate limiter for onboarding/signing endpoints.
- * Replace with Redis or upstream rate limiting in production.
+ * Rate limiter for onboarding/signing endpoints.
+ * Uses Redis (Upstash) when UPSTASH_REDIS_REST_URL is set; otherwise in-memory (single-instance).
  */
 
 const windowMs = 60 * 1000; // 1 minute
@@ -14,7 +14,7 @@ function getKey(request: Request): string {
   return `onboarding:${ip}`;
 }
 
-export function checkRateLimit(request: Request): { ok: boolean; retryAfter?: number } {
+function checkRateLimitInMemory(request: Request): { ok: boolean; retryAfter?: number } {
   const key = getKey(request);
   const now = Date.now();
   let entry = hits.get(key);
@@ -35,4 +35,21 @@ export function checkRateLimit(request: Request): { ok: boolean; retryAfter?: nu
     return { ok: false, retryAfter: Math.ceil((entry.resetAt - now) / 1000) };
   }
   return { ok: true };
+}
+
+export type RateLimitResult = { ok: boolean; retryAfter?: number };
+
+/**
+ * Check rate limit. Uses Redis when UPSTASH_REDIS_REST_* is set; otherwise in-memory.
+ */
+export async function checkRateLimit(request: Request): Promise<RateLimitResult> {
+  try {
+    const { isRedisRateLimitAvailable, checkRateLimitRedis } = await import("./rate-limit-redis");
+    if (isRedisRateLimitAvailable()) {
+      return await checkRateLimitRedis(request);
+    }
+  } catch {
+    // Redis not configured or @upstash packages not installed
+  }
+  return checkRateLimitInMemory(request);
 }

@@ -10,6 +10,7 @@ import { getProtocolConstants } from "@/lib/derive/protocol-constants";
 import { getDepositTypedData, getSignatureExpirySec, generateActionNonce } from "@/lib/derive/action-encoding";
 import { deriveClient } from "@/lib/derive/client";
 import { cn } from "@/lib/utils/cn";
+import { getWalletErrorMessage } from "@/lib/utils/wallet-errors";
 
 const DERIVE_XYZ_URL = "https://derive.xyz";
 const POLL_INTERVAL_MS = 2500;
@@ -245,7 +246,8 @@ export function DepositPanel() {
       setAmount("");
     } catch (err) {
       setTxStatus("error");
-      setErrorMsg(err instanceof Error ? err.message : "Deposit failed");
+      const { message } = getWalletErrorMessage(err, "Deposit failed. Please try again.");
+      setErrorMsg(message);
     } finally {
       setIsDepositing(false);
     }

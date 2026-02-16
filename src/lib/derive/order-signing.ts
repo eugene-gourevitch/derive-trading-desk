@@ -1,12 +1,14 @@
 import type { WalletClient } from "viem";
+import { secureRandomInt } from "@/lib/utils/secure-random";
 
 /**
  * Generate order nonce per Derive API: (UTC timestamp in ms)(random 3 digits).
  * e.g. 1695836058725001
+ * Uses cryptographically secure random for the suffix.
  */
 export function generateOrderNonce(): number {
   const ms = Date.now();
-  const r = Math.floor(Math.random() * 1000); // 0–999
+  const r = secureRandomInt(1000); // 0–999
   return ms * 1000 + r;
 }
 

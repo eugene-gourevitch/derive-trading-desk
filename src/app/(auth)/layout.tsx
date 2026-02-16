@@ -3,6 +3,7 @@
 import { useAccount } from "wagmi";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useWalletLifecycle } from "@/lib/hooks/useWalletLifecycle";
 
 export default function AuthLayout({
   children,
@@ -12,6 +13,7 @@ export default function AuthLayout({
   const { isConnected, isReconnecting } = useAccount();
   const router = useRouter();
   const [hasWaited, setHasWaited] = useState(false);
+  const { chainMismatch, switchToDeriveChain } = useWalletLifecycle();
 
   // Give wagmi time to auto-reconnect on page refresh before redirecting
   useEffect(() => {
@@ -42,5 +44,21 @@ export default function AuthLayout({
     );
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      {chainMismatch && switchToDeriveChain && (
+        <div className="flex items-center justify-center gap-3 border-b border-yellow/30 bg-yellow-dim px-3 py-2 text-sm text-yellow">
+          <span>Wrong network. Switch to Derive to trade.</span>
+          <button
+            type="button"
+            onClick={() => switchToDeriveChain()}
+            className="rounded bg-yellow px-2 py-1 text-bg-primary font-medium hover:brightness-110"
+          >
+            Switch network
+          </button>
+        </div>
+      )}
+      {children}
+    </>
+  );
 }

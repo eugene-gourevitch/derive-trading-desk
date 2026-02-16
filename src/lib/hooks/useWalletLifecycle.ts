@@ -19,7 +19,7 @@ export function useWalletLifecycle() {
   const { switchChainAsync } = useSwitchChain();
   const environment = useUiStore((s) => s.environment);
   const expectedChainId = DERIVE_CHAIN_IDS[environment];
-  const prevAddressRef = useRef<string | undefined>();
+  const prevAddressRef = useRef<string | undefined>(undefined);
   const prevConnectedRef = useRef(false);
 
   // On account change or disconnect: clear auth and reset account state
@@ -50,9 +50,8 @@ export function useWalletLifecycle() {
     chainMismatch,
     expectedChainId,
     currentChainId: chainId,
-    switchToDeriveChain:
-      switchChainAsync && chainMismatch
-        ? () => switchChainAsync({ chainId: expectedChainId })
-        : undefined,
+    switchToDeriveChain: chainMismatch
+      ? () => switchChainAsync({ chainId: expectedChainId })
+      : undefined,
   };
 }

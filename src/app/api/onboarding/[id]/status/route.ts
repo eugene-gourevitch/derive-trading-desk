@@ -6,7 +6,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const limit = checkRateLimit(request);
+  const limit = await checkRateLimit(request);
   if (!limit.ok) {
     return NextResponse.json(
       { error: "Too many requests", retryAfter: limit.retryAfter },

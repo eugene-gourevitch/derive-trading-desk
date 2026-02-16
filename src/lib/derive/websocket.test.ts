@@ -1,0 +1,84 @@
+import { describe, expect, it } from "vitest";
+import type { DeriveTicker } from "@/lib/derive/types";
+import { normalizeTickerSlimUpdate } from "@/lib/derive/websocket";
+
+function makeBaseTicker(overrides: Partial<DeriveTicker> = {}): DeriveTicker {
+  return {
+    instrument_type: "option",
+    instrument_name: "ETH-31DEC26-3000-C",
+    best_bid: "10",
+    best_bid_amount: "1",
+    best_ask: "11",
+    best_ask_amount: "2",
+    timestamp: 1000,
+    mark_price: "10.5",
+    index_price: "3000",
+    min_price: "0.1",
+    max_price: "5000",
+    option_pricing: {
+      delta: "0.4",
+      gamma: "0.01",
+      vega: "0.2",
+      theta: "-0.1",
+      rho: "0.01",
+      iv: "0.5",
+      bid_iv: "0.48",
+      ask_iv: "0.52",
+      mark_price: "10.5",
+      forward_price: "3010",
+    },
+    stats: {
+      contract_volume: "100",
+      num_trades: "10",
+      open_interest: "500",
+      high: "12",
+      low: "9",
+      percent_change: "0.03",
+      usd_change: "0",
+    },
+    last: "10.5",
+    change: "0.03",
+    high: "12",
+    low: "9",
+    open_interest: "500",
+    volume: "100",
+    volume_value: "1000",
+    best_bid_size: "1",
+    best_ask_size: "2",
+    funding_rate: "0",
+    ...overrides,
+  };
+}
+
+describe("normalizeTickerSlimUpdate", () => {
+  it("preserves previous fields when slim update is partial", () => {
+    const prev = makeBaseTicker();
+    const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
+      timestamp: 1100,
+      instrument_ticker: {
+        b: "10.2",
+        a: "11.3",
+      },
+    }, prev);
+
+    expect(next).not.toBeNull();
+    expect(next?.best_bid).toBe("10.2");
+    expect(next?.best_ask).toBe("11.3");
+    expect(next?.mark_price).toBe("10.5");
+    expect(next?.option_pricing?.iv).toBe("0.5");
+    expect(next?.open_interest).toBe("500");
+  });
+
+  it("returns null when update timestamp is older than previous ticker", () => {
+    const prev = makeBaseTicker({ timestamp: 2000 });
+    const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
+      timestamp: 1999,
+      instrument_ticker: {
+        b: "9.9",
+        a: "10.1",
+      },
+    }, prev);
+
+    expect(next).toBeNull();
+  });
+});

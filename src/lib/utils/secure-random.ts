@@ -26,8 +26,9 @@ export function secureRandomHex(byteCount: number): string {
 }
 
 function getCrypto(): Crypto {
-  if (typeof globalThis.crypto !== "undefined" && globalThis.crypto.getRandomValues) {
-    return globalThis.crypto;
+  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
+  if (cryptoObj?.getRandomValues) {
+    return cryptoObj;
   }
   throw new Error("secureRandomInt: crypto.getRandomValues not available");
 }

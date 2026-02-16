@@ -5,7 +5,7 @@ import {
   DERIVE_ENVIRONMENTS,
   type DeriveEnvironment,
 } from "./constants";
-import type { JsonRpcResponse } from "./types";
+import type { DeriveTicker, JsonRpcResponse, OptionPricing } from "./types";
 import { useMarketStore } from "../stores/marketStore";
 import { useUiStore } from "../stores/uiStore";
 
@@ -15,6 +15,96 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+}
+
+interface TickerSlimPayload {
+  timestamp?: number;
+  instrument_ticker?: Record<string, unknown>;
+}
+
+function toStringOrFallback(value: unknown, fallback: string): string {
+  if (value == null) return fallback;
+  return String(value);
+}
+
+export function normalizeTickerSlimUpdate(
+  instrument: string,
+  payload: unknown,
+  previous?: DeriveTicker
+): DeriveTicker | null {
+  const wrapper = payload as TickerSlimPayload;
+  const t = wrapper.instrument_ticker;
+  if (!t) return null;
+
+  const rawTimestamp = (wrapper.timestamp as number | undefined) ?? (t.t as number | undefined);
+  const timestamp = rawTimestamp ?? previous?.timestamp ?? Date.now();
+  if (previous && timestamp < previous.timestamp) {
+    return null;
+  }
+
+  const previousStats = previous?.stats;
+  const tStats = t.stats as Record<string, string | number> | undefined;
+  const stats = {
+    contract_volume: toStringOrFallback(tStats?.c, previousStats?.contract_volume ?? "0"),
+    num_trades: toStringOrFallback(tStats?.n, previousStats?.num_trades ?? "0"),
+    open_interest: toStringOrFallback(tStats?.oi, previousStats?.open_interest ?? "0"),
+    high: toStringOrFallback(tStats?.h, previousStats?.high ?? "0"),
+    low: toStringOrFallback(tStats?.l, previousStats?.low ?? "0"),
+    percent_change: toStringOrFallback(tStats?.p, previousStats?.percent_change ?? "0"),
+    usd_change: previousStats?.usd_change ?? "0",
+  };
+
+  const optionPricing = Object.prototype.hasOwnProperty.call(t, "option_pricing")
+    ? ((t.option_pricing as OptionPricing | null) ?? null)
+    : (previous?.option_pricing ?? null);
+
+  const previousPerp = previous?.perp_details;
+  const fundingRate = toStringOrFallback(t.f, previousPerp?.funding_rate ?? previous?.funding_rate ?? "0");
+  const perpDetails = instrument.includes("-PERP")
+    ? {
+        index: previousPerp?.index ?? "",
+        funding_rate: fundingRate,
+        aggregate_funding: previousPerp?.aggregate_funding ?? "0",
+        max_rate_per_hour: previousPerp?.max_rate_per_hour ?? "0",
+        min_rate_per_hour: previousPerp?.min_rate_per_hour ?? "0",
+        static_interest_rate: previousPerp?.static_interest_rate ?? "0",
+      }
+    : undefined;
+
+  const markPrice = toStringOrFallback(t.M, previous?.mark_price ?? previous?.last ?? "0");
+  const bestBid = toStringOrFallback(t.b, previous?.best_bid ?? "0");
+  const bestAsk = toStringOrFallback(t.a, previous?.best_ask ?? "0");
+  const bestBidAmount = toStringOrFallback(t.B, previous?.best_bid_amount ?? previous?.best_bid_size ?? "0");
+  const bestAskAmount = toStringOrFallback(t.A, previous?.best_ask_amount ?? previous?.best_ask_size ?? "0");
+  const volumeValue = toStringOrFallback(tStats?.v, previous?.volume_value ?? "0");
+
+  return {
+    instrument_type: previous?.instrument_type ?? (instrument.includes("-PERP") ? "perp" : "option"),
+    instrument_name: instrument,
+    best_bid: bestBid,
+    best_bid_amount: bestBidAmount,
+    best_ask: bestAsk,
+    best_ask_amount: bestAskAmount,
+    timestamp,
+    mark_price: markPrice,
+    index_price: toStringOrFallback(t.I, previous?.index_price ?? "0"),
+    min_price: toStringOrFallback(t.minp, previous?.min_price ?? "0"),
+    max_price: toStringOrFallback(t.maxp, previous?.max_price ?? "0"),
+    option_pricing: optionPricing,
+    stats,
+    perp_details: perpDetails,
+    // Convenience aliases
+    last: markPrice,
+    change: stats.percent_change,
+    high: stats.high,
+    low: stats.low,
+    open_interest: stats.open_interest,
+    volume: stats.contract_volume,
+    volume_value: volumeValue,
+    best_bid_size: bestBidAmount,
+    best_ask_size: bestAskAmount,
+    funding_rate: fundingRate,
+  };
 }
 
 /**
@@ -384,58 +474,11 @@ class DeriveWebSocketManager {
       //   stats.h = high, stats.l = low, stats.p = percent_change
       //   stats.pr = previous volume
       //   minp = min_price, maxp = max_price
-      const wrapper = data as { timestamp?: number; instrument_ticker?: Record<string, unknown> };
-      const t = wrapper.instrument_ticker;
-      if (!t) return;
-
-      const tStats = t.stats as Record<string, string | number> | undefined;
-
-      const stats = {
-        contract_volume: String(tStats?.c || "0"),
-        num_trades: String(tStats?.n || "0"),
-        open_interest: String(tStats?.oi || "0"),
-        high: String(tStats?.h || "0"),
-        low: String(tStats?.l || "0"),
-        percent_change: String(tStats?.p || "0"),
-        usd_change: "0",
-      };
-
-      const normalized = {
-        instrument_type: instrument.includes("-PERP") ? "perp" : "option",
-        instrument_name: instrument,
-        best_bid: String(t.b || "0"),
-        best_bid_amount: String(t.B || "0"),
-        best_ask: String(t.a || "0"),
-        best_ask_amount: String(t.A || "0"),
-        timestamp: wrapper.timestamp || (t.t as number) || Date.now(),
-        mark_price: String(t.M || "0"),
-        index_price: String(t.I || "0"),
-        min_price: String(t.minp || "0"),
-        max_price: String(t.maxp || "0"),
-        option_pricing: t.option_pricing || null,
-        stats,
-        perp_details: t.f ? {
-          index: "",
-          funding_rate: String(t.f || "0"),
-          aggregate_funding: "0",
-          max_rate_per_hour: "0",
-          min_rate_per_hour: "0",
-          static_interest_rate: "0",
-        } : undefined,
-        // Convenience aliases
-        last: String(t.M || "0"),
-        change: String(tStats?.p || "0"),
-        high: String(tStats?.h || "0"),
-        low: String(tStats?.l || "0"),
-        open_interest: String(tStats?.oi || "0"),
-        volume: String(tStats?.c || "0"),
-        volume_value: String(tStats?.v || "0"),
-        best_bid_size: String(t.B || "0"),
-        best_ask_size: String(t.A || "0"),
-        funding_rate: String(t.f || "0"),
-      };
-
-      store.updateTicker(instrument, normalized as Parameters<typeof store.updateTicker>[1]);
+      const previous = store.tickers.get(instrument);
+      const normalized = normalizeTickerSlimUpdate(instrument, data, previous);
+      if (normalized) {
+        store.updateTicker(instrument, normalized as Parameters<typeof store.updateTicker>[1]);
+      }
     } else if (channel.startsWith("trades.")) {
       // Channel: trades.perp.ETH.settled
       // Trades are per-currency, not per-instrument. We pass the currency

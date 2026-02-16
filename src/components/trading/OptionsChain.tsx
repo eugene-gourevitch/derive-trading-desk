@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMarketStore } from "@/lib/stores/marketStore";
 import { useUiStore } from "@/lib/stores/uiStore";
+import { useTickerSubscriptions } from "@/lib/hooks/useSubscription";
 import { deriveClient } from "@/lib/derive/client";
 import { parseInstrumentName, formatExpiryCompact, daysToExpiry } from "@/lib/derive/instruments";
 import { formatPrice, formatGreek } from "@/lib/utils/formatting";
@@ -53,6 +54,19 @@ export function OptionsChain() {
 
   const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
 
+  // Instrument names for the selected expiry (for real-time subscriptions)
+  const selectedExpiryInstrumentNames = useMemo(() => {
+    if (!selectedExpiry) return [];
+    return options
+      .filter((inst) => {
+        const parsed = parseInstrumentName(inst.instrument_name);
+        return parsed.expiry && parsed.expiry.toISOString().split("T")[0] === selectedExpiry;
+      })
+      .map((inst) => inst.instrument_name);
+  }, [options, selectedExpiry]);
+
+  useTickerSubscriptions(selectedExpiryInstrumentNames);
+
   // Auto-select first expiry when expiries become available
   useEffect(() => {
     if (!selectedExpiry && expiries.length > 0) {
@@ -60,7 +74,7 @@ export function OptionsChain() {
     }
   }, [expiries, selectedExpiry]);
 
-  // Fetch tickers for option instruments in the selected expiry
+  // Fetch tickers for option instruments in the selected expiry (initial load)
   const fetchedExpiryRef = useRef<string | null>(null);
   useEffect(() => {
     if (!selectedExpiry || fetchedExpiryRef.current === selectedExpiry) return;

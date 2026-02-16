@@ -1,11 +1,11 @@
 "use client";
 
-import { useUiStore } from "../stores/uiStore";
+import { useUiStore } from "@/lib/stores/uiStore";
 import {
   useTickerSubscription,
   useOrderBookSubscription,
   useTradesSubscription,
-} from "./useSubscription";
+} from "@/lib/hooks/useSubscription";
 
 /**
  * Master subscription hook for the currently selected instrument.

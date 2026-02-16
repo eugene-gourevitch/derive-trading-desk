@@ -1,15 +1,27 @@
 "use client";
 
 import { useState, useMemo, useCallback } from "react";
+import { parseUnits } from "viem";
+import { useWalletClient } from "wagmi";
 import { useAccountStore } from "@/lib/stores/accountStore";
+import { useUiStore } from "@/lib/stores/uiStore";
 import { SUPPORTED_COLLATERALS } from "@/lib/derive/types";
+import { getProtocolConstants } from "@/lib/derive/protocol-constants";
+import { getWithdrawTypedData, getSignatureExpirySec, generateActionNonce } from "@/lib/derive/action-encoding";
+import { deriveClient } from "@/lib/derive/client";
 import { formatPrice } from "@/lib/utils/formatting";
 import { cn } from "@/lib/utils/cn";
+
+const POLL_WITHDRAW_MS = 3000;
+const POLL_WITHDRAW_ATTEMPTS = 40;
 
 export function WithdrawPanel() {
   const subaccount = useAccountStore((s) => s.subaccount);
   const isConnected = useAccountStore((s) => s.isConnected);
   const isAuthenticated = useAccountStore((s) => s.isAuthenticated);
+  const deriveWallet = useAccountStore((s) => s.deriveWallet);
+  const environment = useUiStore((s) => s.environment);
+  const { data: walletClient } = useWalletClient();
 
   const [selectedAsset, setSelectedAsset] = useState<string>("USDC");
   const [amount, setAmount] = useState("");
@@ -20,7 +32,6 @@ export function WithdrawPanel() {
 
   const selectedCollateral = SUPPORTED_COLLATERALS.find((c) => c.name === selectedAsset);
 
-  // Find the collateral balance for the selected asset
   const assetBalance = useMemo(() => {
     if (!subaccount) return "0";
     const col = subaccount.collaterals.find((c) => c.asset_name === selectedAsset);
@@ -38,26 +49,76 @@ export function WithdrawPanel() {
       return;
     }
 
+    if (!deriveWallet || !walletClient) {
+      setTxStatus("error");
+      setErrorMsg("Wallet not ready");
+      return;
+    }
+
+    const c = getProtocolConstants(environment);
+    const assetAddress = c.tokenAddresses[selectedAsset] ?? c.cashAddress;
+    if (!assetAddress || assetAddress === "0x0000000000000000000000000000000000000000") {
+      setTxStatus("error");
+      setErrorMsg(`Withdraw for ${selectedAsset} not configured`);
+      return;
+    }
+
+    const decimals = selectedCollateral?.decimals ?? 6;
+    const amountWei = parseUnits(amount, decimals);
+
     setIsWithdrawing(true);
     setTxStatus("pending");
     setErrorMsg(null);
     setTxHash(null);
 
     try {
-      // Withdraw flow:
-      // 1. Sign withdrawal request (EIP-712)
-      // 2. Submit to private/withdraw
-      // 3. Funds bridge back from Derive Chain
-      // For now, log the intent — signing will be wired in Phase 8
-      console.log("[Withdraw]", {
-        asset: selectedAsset,
-        amount,
-        subaccount_id: subaccount.subaccount_id,
+      deriveClient.setEnvironment(environment);
+
+      const nonce = generateActionNonce();
+      const expirySec = getSignatureExpirySec();
+      const typedData = getWithdrawTypedData(
+        {
+          subaccountId: subaccount.subaccount_id,
+          nonce,
+          amountWei,
+          assetAddress,
+          expirySec,
+          wallet: deriveWallet as `0x${string}`,
+          signer: deriveWallet as `0x${string}`,
+        },
+        environment
+      );
+      const signature = await walletClient.signTypedData({
+        domain: typedData.domain,
+        types: typedData.types,
+        primaryType: typedData.primaryType,
+        message: typedData.message,
       });
 
-      await new Promise((r) => setTimeout(r, 1500));
+      const result = await deriveClient.withdraw({
+        subaccount_id: subaccount.subaccount_id,
+        amount,
+        asset_name: selectedAsset,
+        nonce,
+        signature,
+        signature_expiry_sec: expirySec,
+        signer: deriveWallet,
+      });
+
+      const txId = result.transaction_id;
+      setTxHash(txId);
+
+      for (let i = 0; i < POLL_WITHDRAW_ATTEMPTS; i++) {
+        await new Promise((r) => setTimeout(r, POLL_WITHDRAW_MS));
+        const history = await deriveClient.getTransferHistory({
+          subaccount_id: subaccount.subaccount_id,
+        });
+        const transfers = (history as { transfers?: { transaction_id?: string; transfer_id?: string }[] })?.transfers ?? [];
+        if (Array.isArray(transfers) && transfers.some((t) => (t.transaction_id ?? t.transfer_id) === txId)) {
+          break;
+        }
+      }
       setTxStatus("success");
-      setTxHash("0x" + Math.random().toString(16).slice(2, 66));
       setAmount("");
     } catch (err) {
       setTxStatus("error");
@@ -65,13 +126,31 @@ export function WithdrawPanel() {
     } finally {
       setIsWithdrawing(false);
     }
-  }, [amount, selectedAsset, subaccount, assetBalance]);
+  }, [
+    amount,
+    selectedAsset,
+    subaccount,
+    assetBalance,
+    deriveWallet,
+    walletClient,
+    environment,
+    selectedCollateral?.decimals,
+  ]);
 
   if (!isConnected && !isAuthenticated) {
     return (
       <div className="flex h-full flex-col items-center justify-center text-xs text-text-muted">
         <div className="mb-2 text-sm font-medium text-text-secondary">Withdraw</div>
         <div>Connect wallet to withdraw collateral</div>
+      </div>
+    );
+  }
+
+  if (isConnected && !subaccount) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center p-4 text-center text-xs text-text-muted">
+        <div className="mb-2 text-sm font-medium text-text-secondary">Withdraw</div>
+        <p>No subaccount. Create an account first from the Deposit tab.</p>
       </div>
     );
   }

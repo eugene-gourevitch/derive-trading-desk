@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect } from "react";
-import { useAccount } from "wagmi";
-import { useAccountStore } from "../stores/accountStore";
-import { useMarketStore } from "../stores/marketStore";
-import { useUiStore } from "../stores/uiStore";
-import { wsManager } from "../derive/websocket";
-import { deriveClient } from "../derive/client";
-import type { DeriveInstrument, DeriveTicker, InstrumentType, OptionPricing } from "../derive/types";
+import { useAccount, useWalletClient } from "wagmi";
+import { useAccountStore } from "@/lib/stores/accountStore";
+import { useMarketStore } from "@/lib/stores/marketStore";
+import { useUiStore } from "@/lib/stores/uiStore";
+import { usePositionStore } from "@/lib/stores/positionStore";
+import { useOrderStore } from "@/lib/stores/orderStore";
+import { wsManager } from "@/lib/derive/websocket";
+import { deriveClient } from "@/lib/derive/client";
+import { resolveDeriveWallet } from "@/lib/derive/session-keys";
+import type { DeriveAccount, DeriveInstrument, DeriveSubaccount, DeriveTicker, InstrumentType, OptionPricing } from "@/lib/derive/types";
 
 /**
  * All currencies that Derive supports for trading instruments.
@@ -40,46 +43,104 @@ let initInProgress = false;
 
 export function useDeriveInit() {
   const { address: eoaAddress, isConnected } = useAccount();
+  const { data: walletClient } = useWalletClient();
   const environment = useUiStore((s) => s.environment);
 
   useEffect(() => {
     const accountStore = useAccountStore.getState();
     const marketStore = useMarketStore.getState();
+    const positionStore = usePositionStore.getState();
+    const orderStore = useOrderStore.getState();
 
     if (isConnected && eoaAddress) {
       accountStore.setEoaAddress(eoaAddress);
       accountStore.setConnected(true);
     }
 
-    // Always call connect — it's idempotent and will skip if already connected
+    // Always connect WebSocket for public data (idempotent)
     wsManager.connect(environment);
 
-    // Skip if another mount's initialization is already running
-    if (initInProgress) {
-      console.log("[Init] Init already in progress, skipping (Strict Mode re-mount)");
-      return () => {
-        wsManager.disconnect();
-      };
+    let cancelled = false;
+
+    // ── Wallet resolution, auth, and private data (account, positions, orders) ──
+    async function loadWalletAndAccount() {
+      if (!isConnected || !eoaAddress || !walletClient) return;
+      accountStore.setError(null);
+      accountStore.setLoadingAccount(true);
+      try {
+        const deriveWallet = await resolveDeriveWallet(eoaAddress);
+        if (cancelled) return;
+        if (!deriveWallet) {
+          accountStore.setError(
+            "No Derive account for this wallet. Create one at derive.xyz"
+          );
+          accountStore.setLoadingAccount(false);
+          return;
+        }
+        accountStore.setDeriveWallet(deriveWallet);
+
+        const signTimestampWithEoa = (timestamp: string) =>
+          walletClient.signMessage({ message: timestamp });
+        deriveClient.setAuth(deriveWallet, signTimestampWithEoa);
+        wsManager.connect(environment, deriveWallet, signTimestampWithEoa);
+        if (cancelled) return;
+
+        const account = (await deriveClient.getAccount()) as DeriveAccount;
+        if (cancelled) return;
+        accountStore.setAccount(account);
+        accountStore.setAuthenticated(true);
+
+        const subaccountId = account.default_subaccount_id;
+        const subaccount = (await deriveClient.getSubaccount(subaccountId)) as DeriveSubaccount;
+        if (cancelled) return;
+        accountStore.setSubaccount(subaccount);
+        accountStore.setActiveSubaccountId(subaccountId);
+
+        const [positions, openOrders] = await Promise.all([
+          deriveClient.getPositions(subaccountId),
+          deriveClient.getOpenOrders(subaccountId),
+        ]);
+        if (cancelled) return;
+        positionStore.setPositions(Array.isArray(positions) ? positions : []);
+        orderStore.setOpenOrders(Array.isArray(openOrders) ? openOrders : []);
+
+        accountStore.setError(null);
+        console.log("[Init] Account and private data loaded");
+      } catch (err) {
+        if (!cancelled) {
+          const message = err instanceof Error ? err.message : "Unable to load account";
+          accountStore.setError(message);
+          console.warn("[Init] Account load failed:", err);
+        }
+      } finally {
+        if (!cancelled) accountStore.setLoadingAccount(false);
+      }
     }
 
-    // Check if instruments are already loaded (e.g. HMR, Strict Mode where first mount completed)
-    if (marketStore.instrumentsList.length > 0) {
-      console.log("[Init] Instruments already loaded, skipping fetch");
+    loadWalletAndAccount();
+
+    // ── Instruments and tickers (public data) ──
+    if (initInProgress) {
       return () => {
+        cancelled = true;
         wsManager.disconnect();
+        deriveClient.clearAuth();
+      };
+    }
+    if (marketStore.instrumentsList.length > 0) {
+      return () => {
+        cancelled = true;
+        wsManager.disconnect();
+        deriveClient.clearAuth();
       };
     }
 
     initInProgress = true;
-    let cancelled = false;
 
     async function initialize() {
       console.log("[Init] Starting Derive initialization...");
       console.log("[Init] Environment:", environment);
 
-      // WebSocket already connected above (before this async function)
-
-      // ── Step 1: Fetch ALL instruments across all currencies ──
       console.log("[Init] Fetching instruments for", SUPPORTED_CURRENCIES.length, "currencies...");
       marketStore.setLoadingInstruments(true);
 
@@ -100,8 +161,6 @@ export function useDeriveInit() {
         return [];
       };
 
-      // Fetch perps and options for all currencies in parallel batches
-      // Batch into groups of 10 to avoid overwhelming the API
       const batchSize = 10;
       for (let i = 0; i < SUPPORTED_CURRENCIES.length; i += batchSize) {
         if (cancelled) return;
@@ -121,7 +180,6 @@ export function useDeriveInit() {
 
       if (allInstruments.length > 0) {
         marketStore.setInstruments(allInstruments);
-        // Log summary
         const perps = allInstruments.filter((i) => i.instrument_type === "perp");
         const options = allInstruments.filter((i) => i.instrument_type === "option");
         const currencies = new Set(allInstruments.map((i) => i.instrument_name.split("-")[0]));
@@ -131,12 +189,10 @@ export function useDeriveInit() {
 
       if (cancelled) return;
 
-      // ── Step 3: Fetch tickers for all perps (they're few enough) ──
       const perpInstruments = allInstruments
         .filter((i) => i.instrument_type === "perp")
         .map((i) => i.instrument_name);
 
-      // Batch ticker fetches to avoid overloading
       const tickerBatchSize = 5;
       for (let i = 0; i < perpInstruments.length; i += tickerBatchSize) {
         if (cancelled) return;
@@ -172,7 +228,7 @@ export function useDeriveInit() {
       wsManager.disconnect();
       deriveClient.clearAuth();
     };
-  }, [isConnected, eoaAddress, environment]);
+  }, [isConnected, eoaAddress, environment, walletClient]);
 }
 
 /**

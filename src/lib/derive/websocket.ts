@@ -448,7 +448,7 @@ class DeriveWebSocketManager {
         for (const trade of trades) {
           // Each trade should have instrument_name
           const instName = (trade.instrument_name as string) || `${currency}-PERP`;
-          store.addTrade(instName, trade as Parameters<typeof store.addTrade>[1]);
+          store.addTrade(instName, trade as unknown as Parameters<typeof store.addTrade>[1]);
         }
       }
     }

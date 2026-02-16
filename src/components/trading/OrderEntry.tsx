@@ -1,19 +1,43 @@
 "use client";
 
 import { useState } from "react";
+import { useWalletClient } from "wagmi";
 import { useUiStore } from "@/lib/stores/uiStore";
 import { useMarketStore } from "@/lib/stores/marketStore";
+import { useAccountStore } from "@/lib/stores/accountStore";
+import { useOrderStore } from "@/lib/stores/orderStore";
+import { usePositionStore } from "@/lib/stores/positionStore";
 import { useTickerSubscription } from "@/lib/hooks/useSubscription";
 import { formatPrice, formatUsd } from "@/lib/utils/formatting";
 import { cn } from "@/lib/utils/cn";
+import { deriveClient } from "@/lib/derive/client";
+import {
+  generateOrderNonce,
+  getSignatureExpirySec,
+  signOrderMessage,
+} from "@/lib/derive/order-signing";
+import { toast } from "sonner";
 import type { OrderSide, OrderType, TimeInForce } from "@/lib/derive/types";
 
 type OrderTab = "limit" | "market";
+
+function refetchPrivateData(subaccountId: number) {
+  Promise.all([
+    deriveClient.getOpenOrders(subaccountId),
+    deriveClient.getPositions(subaccountId),
+  ]).then(([orders, positions]) => {
+    useOrderStore.getState().setOpenOrders(Array.isArray(orders) ? orders : []);
+    usePositionStore.getState().setPositions(Array.isArray(positions) ? positions : []);
+  }).catch(() => {});
+}
 
 export function OrderEntry() {
   const instrument = useUiStore((s) => s.selectedInstrument);
   useTickerSubscription(instrument);
   const ticker = useMarketStore((s) => s.tickers.get(instrument || ""));
+  const { data: walletClient } = useWalletClient();
+  const activeSubaccountId = useAccountStore((s) => s.activeSubaccountId);
+  const deriveWallet = useAccountStore((s) => s.deriveWallet);
 
   const [side, setSide] = useState<OrderSide>("buy");
   const [orderType, setOrderType] = useState<OrderTab>("limit");
@@ -30,20 +54,53 @@ export function OrderEntry() {
 
   const handleSubmit = async () => {
     if (!instrument || !amount || (orderType === "limit" && !price)) return;
+    if (!walletClient || activeSubaccountId == null || !deriveWallet) {
+      toast.error("Connect wallet and load account first");
+      return;
+    }
+    if (!deriveClient.isAuthenticated) {
+      toast.error("Session expired. Re-enter the desk.");
+      return;
+    }
     setIsSubmitting(true);
-
-    // TODO: Phase 3 - implement actual signing and submission
-    console.log("Submit order:", {
-      instrument,
-      side,
-      orderType,
-      price,
-      amount,
-      tif,
-      reduceOnly,
-    });
-
-    setTimeout(() => setIsSubmitting(false), 500);
+    const limitPrice = orderType === "limit" ? price : (ticker?.mark_price ?? price);
+    const nonce = generateOrderNonce();
+    const signatureExpirySec = getSignatureExpirySec();
+    try {
+      const signature = await signOrderMessage(walletClient, {
+        subaccountId: activeSubaccountId,
+        instrumentName: instrument,
+        direction: side,
+        orderType,
+        amount,
+        limitPrice,
+        timeInForce: tif,
+        nonce,
+        signatureExpirySec,
+      });
+      await deriveClient.submitOrder({
+        subaccount_id: activeSubaccountId,
+        instrument_name: instrument,
+        direction: side,
+        order_type: orderType,
+        amount,
+        limit_price: limitPrice,
+        time_in_force: tif,
+        max_fee: "0",
+        label: "",
+        signature,
+        nonce,
+        signer: deriveWallet,
+        signature_expiry_sec: signatureExpirySec,
+      });
+      toast.success("Order submitted");
+      refetchPrivateData(activeSubaccountId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Order failed";
+      toast.error(message);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

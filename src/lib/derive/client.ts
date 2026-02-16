@@ -233,6 +233,38 @@ export class DeriveClient {
     return this.call("private/get_collaterals", { subaccount_id });
   }
 
+  /** Deposit to existing subaccount. Caller must sign EIP-712 action and pass signature. */
+  async deposit(params: {
+    subaccount_id: number;
+    amount: string;
+    asset_name: string;
+    nonce: number;
+    signature: string;
+    signature_expiry_sec: number;
+    signer: string;
+  }) {
+    return this.call<{ status: string; transaction_id: string }>(
+      "private/deposit",
+      params
+    );
+  }
+
+  /** Withdraw from subaccount. Caller must sign EIP-712 action and pass signature. */
+  async withdraw(params: {
+    subaccount_id: number;
+    amount: string;
+    asset_name: string;
+    nonce: number;
+    signature: string;
+    signature_expiry_sec: number;
+    signer: string;
+  }) {
+    return this.call<{ status: string; transaction_id: string }>(
+      "private/withdraw",
+      params
+    );
+  }
+
   // ── Session Key Registration ──
 
   async buildRegisterSessionKeyTx(params: {

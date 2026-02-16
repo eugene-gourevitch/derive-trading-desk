@@ -161,13 +161,13 @@ export function InstrumentSelector() {
                             </span>
                             <span
                               className={cn(
-                                parseFloat(ticker.change) >= 0
+                                parseFloat(ticker.change ?? "0") >= 0
                                   ? "text-green"
                                   : "text-red"
                               )}
                             >
-                              {parseFloat(ticker.change) >= 0 ? "+" : ""}
-                              {(parseFloat(ticker.change) * 100).toFixed(2)}%
+                              {parseFloat(ticker.change ?? "0") >= 0 ? "+" : ""}
+                              {(parseFloat(ticker.change ?? "0") * 100).toFixed(2)}%
                             </span>
                           </>
                         )}

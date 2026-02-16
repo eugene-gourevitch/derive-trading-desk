@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { wsManager } from "../derive/websocket";
-import { useUiStore } from "../stores/uiStore";
+import { wsManager } from "@/lib/derive/websocket";
+import { useUiStore } from "@/lib/stores/uiStore";
 
 /**
  * Subscribe to a WebSocket channel. Auto-unsubs on unmount.
@@ -57,6 +57,31 @@ export function useOrderBookSubscription(
 export function useTickerSubscription(instrument: string | null): void {
   const channel = instrument ? `ticker_slim.${instrument}.100` : null;
   useSubscription(channel);
+}
+
+const TICKER_SLIM_INTERVAL = 100;
+
+/**
+ * Subscribe to ticker_slim for multiple instruments (e.g. all options in the chain).
+ * Updates flow into the market store via wsManager's routeToStore; no custom handler needed.
+ */
+export function useTickerSubscriptions(instrumentNames: string[]): void {
+  const wsConnected = useUiStore((s) => s.wsConnected);
+
+  const channelKey = [...instrumentNames].sort().join(",");
+
+  useEffect(() => {
+    if (!wsConnected || instrumentNames.length === 0) return;
+
+    const unsubs = instrumentNames.map((name) => {
+      const channel = `ticker_slim.${name}.${TICKER_SLIM_INTERVAL}`;
+      return wsManager.subscribe(channel, () => {});
+    });
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [wsConnected, channelKey]);
 }
 
 /**

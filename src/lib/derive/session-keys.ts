@@ -65,7 +65,7 @@ export function createSessionSigner(
 /**
  * Resolve the Derive wallet address from an EOA address
  */
-export async function resolveDeriverWallet(
+export async function resolveDeriveWallet(
   eoaAddress: string
 ): Promise<string | null> {
   try {

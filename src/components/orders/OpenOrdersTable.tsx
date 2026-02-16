@@ -1,23 +1,63 @@
 "use client";
 
 import { useOrderStore } from "@/lib/stores/orderStore";
+import { useAccountStore } from "@/lib/stores/accountStore";
 import { formatPrice, formatQty, formatDateTime } from "@/lib/utils/formatting";
 import { cn } from "@/lib/utils/cn";
 import { toast } from "sonner";
+import { deriveClient } from "@/lib/derive/client";
+
+function refetchOpenOrders(subaccountId: number) {
+  deriveClient.getOpenOrders(subaccountId).then((orders) => {
+    useOrderStore.getState().setOpenOrders(Array.isArray(orders) ? orders : []);
+  }).catch(() => {});
+}
 
 export function OpenOrdersTable() {
   const openOrders = useOrderStore((s) => s.openOrders);
   const removeOrder = useOrderStore((s) => s.removeOpenOrder);
+  const activeSubaccountId = useAccountStore((s) => s.activeSubaccountId);
 
   const handleCancel = async (orderId: string) => {
-    // TODO: Phase 3 — call deriveClient.cancelOrder
+    if (activeSubaccountId == null) {
+      toast.error("No account loaded");
+      return;
+    }
+    if (!deriveClient.isAuthenticated) {
+      toast.error("Session expired. Re-enter the desk.");
+      return;
+    }
     toast.info(`Cancelling order ${orderId.slice(0, 8)}...`);
-    removeOrder(orderId);
+    try {
+      await deriveClient.cancelOrder(orderId, activeSubaccountId);
+      removeOrder(orderId);
+      refetchOpenOrders(activeSubaccountId);
+      toast.success("Order cancelled");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Cancel failed";
+      toast.error(message);
+    }
   };
 
-  const handleCancelAll = () => {
-    // TODO: Phase 3 — call deriveClient.cancelAllOrders
+  const handleCancelAll = async () => {
+    if (activeSubaccountId == null) {
+      toast.error("No account loaded");
+      return;
+    }
+    if (!deriveClient.isAuthenticated) {
+      toast.error("Session expired. Re-enter the desk.");
+      return;
+    }
     toast.info("Cancelling all orders...");
+    try {
+      await deriveClient.cancelAllOrders(activeSubaccountId);
+      useOrderStore.getState().setOpenOrders([]);
+      refetchOpenOrders(activeSubaccountId);
+      toast.success("All orders cancelled");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Cancel all failed";
+      toast.error(message);
+    }
   };
 
   if (openOrders.length === 0) {

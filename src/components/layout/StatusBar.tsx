@@ -14,6 +14,7 @@ export function StatusBar() {
   const selectedInstrument = useUiStore((s) => s.selectedInstrument);
   const toggleCommandPalette = useUiStore((s) => s.toggleCommandPalette);
   const deriveWallet = useAccountStore((s) => s.deriveWallet);
+  const accountError = useAccountStore((s) => s.error);
   const ticker = useMarketStore((s) => s.tickers.get(selectedInstrument || ""));
 
   useEffect(() => {
@@ -40,6 +41,11 @@ export function StatusBar() {
     <div className="flex h-7 items-center justify-between border-b border-border-default bg-bg-secondary px-3 text-xs">
       {/* Left */}
       <div className="flex items-center gap-3">
+        {accountError && (
+          <span className="rounded bg-red/20 px-1.5 py-0.5 text-[10px] text-red" title={accountError}>
+            Account error
+          </span>
+        )}
         <div className="flex items-center gap-1.5">
           <div
             className={`h-1.5 w-1.5 rounded-full ${

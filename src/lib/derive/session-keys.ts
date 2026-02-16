@@ -75,6 +75,8 @@ export async function resolveDeriveWallet(
     );
     return result.wallet;
   } catch {
-    return null;
+    // Most users are self-custodied; fallback to the connected EOA.
+    // Private/get_account with auth will determine whether the account exists.
+    return eoaAddress;
   }
 }

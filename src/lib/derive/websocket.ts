@@ -22,9 +22,68 @@ interface TickerSlimPayload {
   instrument_ticker?: Record<string, unknown>;
 }
 
+interface CompactOptionPricingPayload {
+  d?: string | number;  // delta
+  t?: string | number;  // theta
+  g?: string | number;  // gamma
+  v?: string | number;  // vega
+  i?: string | number;  // iv
+  r?: string | number;  // rho
+  bi?: string | number; // bid iv
+  ai?: string | number; // ask iv
+  m?: string | number;  // mark price
+  f?: string | number;  // forward price
+}
+
 function toStringOrFallback(value: unknown, fallback: string): string {
   if (value == null) return fallback;
   return String(value);
+}
+
+function normalizeOptionPricing(
+  payload: unknown,
+  previous: OptionPricing | null | undefined
+): OptionPricing | null {
+  if (payload == null) return previous ?? null;
+
+  const raw = payload as Record<string, unknown>;
+
+  // Full-shape option_pricing from REST/get_ticker responses.
+  if ("iv" in raw || "delta" in raw) {
+    return {
+      delta: toStringOrFallback(raw.delta, previous?.delta ?? "0"),
+      gamma: toStringOrFallback(raw.gamma, previous?.gamma ?? "0"),
+      vega: toStringOrFallback(raw.vega, previous?.vega ?? "0"),
+      theta: toStringOrFallback(raw.theta, previous?.theta ?? "0"),
+      rho: toStringOrFallback(raw.rho, previous?.rho ?? "0"),
+      iv: toStringOrFallback(raw.iv, previous?.iv ?? "0"),
+      bid_iv: toStringOrFallback(raw.bid_iv, previous?.bid_iv ?? "0"),
+      ask_iv: toStringOrFallback(raw.ask_iv, previous?.ask_iv ?? "0"),
+      mark_price: toStringOrFallback(raw.mark_price, previous?.mark_price ?? "0"),
+      forward_price: toStringOrFallback(raw.forward_price, previous?.forward_price ?? "0"),
+    };
+  }
+
+  // Compact-shape option_pricing from ticker_slim websocket updates.
+  const compact = raw as CompactOptionPricingPayload;
+  return {
+    delta: toStringOrFallback(compact.d, previous?.delta ?? "0"),
+    gamma: toStringOrFallback(compact.g, previous?.gamma ?? "0"),
+    vega: toStringOrFallback(compact.v, previous?.vega ?? "0"),
+    theta: toStringOrFallback(compact.t, previous?.theta ?? "0"),
+    rho: toStringOrFallback(compact.r, previous?.rho ?? "0"),
+    iv: toStringOrFallback(compact.i, previous?.iv ?? "0"),
+    bid_iv: toStringOrFallback(compact.bi, previous?.bid_iv ?? "0"),
+    ask_iv: toStringOrFallback(compact.ai, previous?.ask_iv ?? "0"),
+    mark_price: toStringOrFallback(compact.m, previous?.mark_price ?? "0"),
+    forward_price: toStringOrFallback(compact.f, previous?.forward_price ?? "0"),
+  };
+}
+
+function extractTickerSlimInstrument(channel: string): string | null {
+  if (!channel.startsWith("ticker_slim.")) return null;
+  const parts = channel.split(".");
+  return parts[1] ?? null;
 }
 
 export function normalizeTickerSlimUpdate(
@@ -55,7 +114,10 @@ export function normalizeTickerSlimUpdate(
   };
 
   const optionPricing = Object.prototype.hasOwnProperty.call(t, "option_pricing")
-    ? ((t.option_pricing as OptionPricing | null) ?? null)
+    ? normalizeOptionPricing(
+      (t as Record<string, unknown>).option_pricing,
+      previous?.option_pricing
+    )
     : (previous?.option_pricing ?? null);
 
   const previousPerp = previous?.perp_details;
@@ -417,8 +479,10 @@ class DeriveWebSocketManager {
 
     requestAnimationFrame(() => {
       this.rafScheduled = false;
+      const store = useMarketStore.getState();
       const buffer = this.updateBuffer;
       this.updateBuffer = [];
+      const tickerUpdates = new Map<string, DeriveTicker>();
 
       for (const { channel, data } of buffer) {
         // Dispatch to registered handlers
@@ -433,8 +497,23 @@ class DeriveWebSocketManager {
           }
         }
 
-        // Auto-route to stores based on channel prefix
+        if (channel.startsWith("ticker_slim.")) {
+          const instrument = extractTickerSlimInstrument(channel);
+          if (!instrument) continue;
+          const previous = tickerUpdates.get(instrument) ?? store.tickers.get(instrument);
+          const normalized = normalizeTickerSlimUpdate(instrument, data, previous);
+          if (normalized) {
+            tickerUpdates.set(instrument, normalized);
+          }
+          continue;
+        }
+
+        // Auto-route non-ticker channels to stores immediately.
         this.routeToStore(channel, data);
+      }
+
+      if (tickerUpdates.size > 0) {
+        store.updateTickersBulk(Array.from(tickerUpdates.entries()));
       }
     });
   }
@@ -459,26 +538,8 @@ class DeriveWebSocketManager {
         store.updateOrderBook(instrument, data as Parameters<typeof store.updateOrderBook>[1]);
       }
     } else if (channel.startsWith("ticker_slim.")) {
-      // Channel: ticker_slim.ETH-PERP.100
-      const parts = channel.split(".");
-      const instrument = parts[1]; // e.g. "ETH-PERP"
-      if (!instrument) return;
-
-      // ticker_slim data uses abbreviated keys inside data.instrument_ticker:
-      //   A = best_ask_amount, a = best_ask_price
-      //   B = best_bid_amount, b = best_bid_price
-      //   f = funding_rate
-      //   I = index_price, M = mark_price
-      //   stats.c = contract_volume, stats.v = volume_value
-      //   stats.n = num_trades, stats.oi = open_interest
-      //   stats.h = high, stats.l = low, stats.p = percent_change
-      //   stats.pr = previous volume
-      //   minp = min_price, maxp = max_price
-      const previous = store.tickers.get(instrument);
-      const normalized = normalizeTickerSlimUpdate(instrument, data, previous);
-      if (normalized) {
-        store.updateTicker(instrument, normalized as Parameters<typeof store.updateTicker>[1]);
-      }
+      // ticker_slim updates are batched in scheduleFlush() to reduce re-renders.
+      return;
     } else if (channel.startsWith("trades.")) {
       // Channel: trades.perp.ETH.settled
       // Trades are per-currency, not per-instrument. We pass the currency

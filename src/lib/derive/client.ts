@@ -150,6 +150,13 @@ export class DeriveClient {
     return this.call("public/get_index", { instrument_name });
   }
 
+  async createAccount(wallet: string) {
+    return this.call<{ status: "created" | "exists"; wallet: string }>(
+      "public/create_account",
+      { wallet }
+    );
+  }
+
   // ── Private Endpoints ──
 
   async getAccount() {
@@ -166,6 +173,38 @@ export class DeriveClient {
 
   async getPositions(subaccount_id: number) {
     return this.call("private/get_positions", { subaccount_id });
+  }
+
+  async getSubaccounts(wallet?: string) {
+    const targetWallet = wallet ?? this.wallet;
+    if (!targetWallet) {
+      throw new DeriveApiError(
+        "Wallet required for get_subaccounts",
+        -1,
+        "private/get_subaccounts"
+      );
+    }
+    return this.call<{ subaccounts: { subaccount_id: number }[] }>(
+      "private/get_subaccounts",
+      { wallet: targetWallet }
+    );
+  }
+
+  async createSubaccount(params: {
+    wallet: string;
+    signer: string;
+    margin_type: "SM" | "PM" | "PM2";
+    amount: string;
+    asset_name: string;
+    nonce: number;
+    signature: string;
+    signature_expiry_sec: number;
+    currency?: string;
+  }) {
+    return this.call<{ status: string; transaction_id: string }>(
+      "private/create_subaccount",
+      params
+    );
   }
 
   async submitOrder(params: {

@@ -20,9 +20,8 @@
     "@tanstack/react-table": "^8.20.0",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.36.2",
-    "@wagmi/core": "^2.16.0",
-    "@walletconnect/ethereum-provider": "^2.17.0",
-    "@walletconnect/modal": "^2.7.0",
+    "@wagmi/core": "^3.3.4",
+    "@walletconnect/ethereum-provider": "^2.23.5",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
     "cmdk": "^1.0.0",
@@ -37,8 +36,8 @@
     "react-resizable-panels": "^2.1.0",
     "sonner": "^1.7.0",
     "tailwind-merge": "^2.6.0",
-    "viem": "^2.21.0",
-    "wagmi": "^2.14.0",
+    "viem": "^2.46.1",
+    "wagmi": "^3.4.4",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

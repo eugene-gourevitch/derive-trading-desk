@@ -1,18 +1,17 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { parseUnits } from "viem";
 import { useAccount, useWalletClient, useSwitchChain, useWriteContract } from "wagmi";
 import { useAccountStore } from "@/lib/stores/accountStore";
 import { useUiStore } from "@/lib/stores/uiStore";
-import { SUPPORTED_COLLATERALS } from "@/lib/derive/types";
+import { SUPPORTED_COLLATERALS, type DeriveAccount, type DeriveSubaccount } from "@/lib/derive/types";
 import { getProtocolConstants } from "@/lib/derive/protocol-constants";
 import { getDepositTypedData, getSignatureExpirySec, generateActionNonce } from "@/lib/derive/action-encoding";
 import { deriveClient } from "@/lib/derive/client";
 import { cn } from "@/lib/utils/cn";
 import { getWalletErrorMessage } from "@/lib/utils/wallet-errors";
 
-const DERIVE_XYZ_URL = "https://derive.xyz";
 const POLL_INTERVAL_MS = 2500;
 
 type OnboardingStatus =
@@ -29,6 +28,11 @@ export function DepositPanel() {
   const isAuthenticated = useAccountStore((s) => s.isAuthenticated);
   const isLoadingAccount = useAccountStore((s) => s.isLoadingAccount);
   const accountError = useAccountStore((s) => s.error);
+  const setAccount = useAccountStore((s) => s.setAccount);
+  const setSubaccount = useAccountStore((s) => s.setSubaccount);
+  const setActiveSubaccountId = useAccountStore((s) => s.setActiveSubaccountId);
+  const setAuthenticated = useAccountStore((s) => s.setAuthenticated);
+  const setStoreError = useAccountStore((s) => s.setError);
 
   const [selectedAsset, setSelectedAsset] = useState<string>("USDC");
   const [amount, setAmount] = useState("");
@@ -37,79 +41,8 @@ export function DepositPanel() {
   const [txHash, setTxHash] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [onboardingId, setOnboardingId] = useState<string | null>(null);
   const [onboardingStatus, setOnboardingStatus] = useState<OnboardingStatus | null>(null);
   const [isStartingOnboarding, setIsStartingOnboarding] = useState(false);
-
-  useEffect(() => {
-    if (!onboardingId) return;
-    const t = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/onboarding/${onboardingId}/status`);
-        const data = await res.json();
-        setOnboardingStatus(data.status);
-        if (data.status?.state === "completed" || data.status?.state === "failed") {
-          clearInterval(t);
-        }
-      } catch {
-        // keep polling
-      }
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(t);
-  }, [onboardingId]);
-
-  const startOnboarding = useCallback(async () => {
-    setIsStartingOnboarding(true);
-    setOnboardingStatus({ state: "loading" });
-    setErrorMsg(null);
-    try {
-      const res = await fetch("/api/onboarding/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setOnboardingStatus({ state: "failed", error: data.error ?? "Failed to start" });
-        setErrorMsg(data.error ?? "Failed to start onboarding");
-        return;
-      }
-      setOnboardingId(data.id);
-      setOnboardingStatus(data.status ?? { state: "loading" });
-    } catch (err) {
-      setOnboardingStatus({ state: "failed", error: (err as Error).message });
-      setErrorMsg((err as Error).message);
-    } finally {
-      setIsStartingOnboarding(false);
-    }
-  }, []);
-
-  const retryOnboarding = useCallback(async () => {
-    if (!onboardingId) return;
-    setIsStartingOnboarding(true);
-    setOnboardingStatus({ state: "loading" });
-    setErrorMsg(null);
-    try {
-      const res = await fetch(`/api/onboarding/${onboardingId}/retry`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setOnboardingStatus({ state: "failed", error: data.error ?? "Retry failed" });
-        setErrorMsg(data.error ?? "Retry failed");
-        return;
-      }
-      setOnboardingStatus(data.status ?? { state: "loading" });
-    } catch (err) {
-      setOnboardingStatus({ state: "failed", error: (err as Error).message });
-      setErrorMsg((err as Error).message);
-    } finally {
-      setIsStartingOnboarding(false);
-    }
-  }, [onboardingId]);
-
   const selectedCollateral = SUPPORTED_COLLATERALS.find((c) => c.name === selectedAsset);
   const environment = useUiStore((s) => s.environment);
   const deriveWallet = useAccountStore((s) => s.deriveWallet);
@@ -117,6 +50,106 @@ export function DepositPanel() {
   const { data: walletClient } = useWalletClient();
   const { switchChainAsync } = useSwitchChain();
   const { writeContractAsync } = useWriteContract();
+
+  const startOnboarding = useCallback(async () => {
+    if (!isConnected || !eoaAddress || !walletClient) {
+      setOnboardingStatus({
+        state: "failed",
+        error: "Connect your wallet first to create an account.",
+      });
+      return;
+    }
+
+    const wallet = deriveWallet ?? eoaAddress;
+    setIsStartingOnboarding(true);
+    setOnboardingStatus({ state: "loading" });
+    setErrorMsg(null);
+    try {
+      deriveClient.setEnvironment(environment);
+      deriveClient.setAuth(wallet, (timestamp) =>
+        walletClient.signMessage({ message: timestamp })
+      );
+
+      await deriveClient.createAccount(wallet);
+
+      const nonce = generateActionNonce();
+      const expirySec = getSignatureExpirySec();
+      const amountWei = parseUnits("0", 6);
+      const typedData = getDepositTypedData(
+        {
+          subaccountId: 0,
+          nonce,
+          amountWei,
+          expirySec,
+          wallet: wallet as `0x${string}`,
+          signer: wallet as `0x${string}`,
+        },
+        environment
+      );
+      const signature = await walletClient.signTypedData({
+        domain: typedData.domain,
+        types: typedData.types,
+        primaryType: typedData.primaryType,
+        message: typedData.message,
+      });
+
+      const createResult = await deriveClient.createSubaccount({
+        wallet,
+        signer: wallet,
+        margin_type: "SM",
+        amount: "0",
+        asset_name: "USDC",
+        nonce,
+        signature,
+        signature_expiry_sec: expirySec,
+      });
+      setOnboardingStatus({
+        state: "waiting_for_chain",
+        transactionId: createResult.transaction_id,
+      });
+
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        const account = await deriveClient.getAccount();
+        const subaccounts = await deriveClient.getSubaccounts(wallet);
+        const latest = subaccounts.subaccounts?.[subaccounts.subaccounts.length - 1];
+        if (!latest) continue;
+
+        const loadedSubaccount = await deriveClient.getSubaccount(latest.subaccount_id);
+        setAccount(account as DeriveAccount);
+        setSubaccount(loadedSubaccount as DeriveSubaccount);
+        setActiveSubaccountId(latest.subaccount_id);
+        setAuthenticated(true);
+        setStoreError(null);
+        setOnboardingStatus({
+          state: "completed",
+          subaccountId: latest.subaccount_id,
+        });
+        return;
+      }
+
+      setOnboardingStatus({
+        state: "failed",
+        error: "Created account, but subaccount confirmation timed out. Please retry.",
+      });
+    } catch (err) {
+      setOnboardingStatus({ state: "failed", error: (err as Error).message });
+      setErrorMsg((err as Error).message);
+    } finally {
+      setIsStartingOnboarding(false);
+    }
+  }, [
+    deriveWallet,
+    eoaAddress,
+    environment,
+    isConnected,
+    setAccount,
+    setActiveSubaccountId,
+    setAuthenticated,
+    setStoreError,
+    setSubaccount,
+    walletClient,
+  ]);
 
   const DERIVE_CHAIN_ID = environment === "testnet" ? 901 : 957;
   const POLL_DEPOSIT_MS = 3000;
@@ -287,7 +320,7 @@ export function DepositPanel() {
   if (isConnected && !subaccount) {
     const status = onboardingStatus;
     const isWaiting =
-      status?.state === "waiting_for_chain" || status?.state === "loading" || (onboardingId && !status);
+      status?.state === "waiting_for_chain" || status?.state === "loading";
     const isFailed =
       status?.state === "failed" || status?.state === "failed_signature";
     const isCompleted = status?.state === "completed" && "subaccountId" in status;
@@ -295,7 +328,7 @@ export function DepositPanel() {
     return (
       <div className="flex h-full flex-col items-center justify-center p-4 text-center text-xs text-text-muted">
         <div className="mb-2 text-sm font-medium text-text-secondary">Deposit</div>
-        {!onboardingId && !status && (
+        {!status && (
           <>
             <p className="mb-3">
               {accountError || "No Derive account or subaccount found."}
@@ -307,30 +340,22 @@ export function DepositPanel() {
             >
               {isStartingOnboarding ? "Creating account…" : "Create account (automated)"}
             </button>
-            <a
-              href={DERIVE_XYZ_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent hover:underline"
-            >
-              Or create at derive.xyz →
-            </a>
           </>
         )}
-        {onboardingId && isWaiting && (
+        {isWaiting && (
           <p className="mb-2">
             {status?.state === "loading"
               ? "Creating account…"
               : "Waiting for chain confirmation…"}
           </p>
         )}
-        {onboardingId && isFailed && (
+        {isFailed && (
           <>
             <p className="mb-2 text-red">
               {(status && "error" in status && status.error) || "Onboarding failed."}
             </p>
             <button
-              onClick={retryOnboarding}
+              onClick={startOnboarding}
               disabled={isStartingOnboarding}
               className="rounded-md border border-border-default bg-bg-tertiary px-4 py-2 text-sm hover:bg-bg-hover disabled:opacity-50"
             >
@@ -338,9 +363,9 @@ export function DepositPanel() {
             </button>
           </>
         )}
-        {onboardingId && isCompleted && (
+        {isCompleted && (
           <p className="text-green">
-            Account ready (Sub #{status.subaccountId}). Refresh the page to load your account.
+            Account ready (Sub #{status.subaccountId}).
           </p>
         )}
       </div>

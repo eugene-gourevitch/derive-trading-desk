@@ -81,4 +81,65 @@ describe("normalizeTickerSlimUpdate", () => {
 
     expect(next).toBeNull();
   });
+
+  it("maps compact option_pricing fields from ticker_slim updates", () => {
+    const prev = makeBaseTicker();
+    const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
+      timestamp: 2100,
+      instrument_ticker: {
+        option_pricing: {
+          d: "0.25",
+          t: "-0.12",
+          g: "0.0042",
+          v: "0.55",
+          i: "0.69",
+          r: "1.2",
+          f: "3020",
+          m: "12.5",
+          bi: "0.66",
+          ai: "0.72",
+        },
+      },
+    }, prev);
+
+    expect(next).not.toBeNull();
+    expect(next?.option_pricing).toEqual({
+      delta: "0.25",
+      theta: "-0.12",
+      gamma: "0.0042",
+      vega: "0.55",
+      iv: "0.69",
+      rho: "1.2",
+      mark_price: "12.5",
+      forward_price: "3020",
+      bid_iv: "0.66",
+      ask_iv: "0.72",
+    });
+  });
+
+  it("preserves previous option_pricing when update has empty option_pricing payload", () => {
+    const prev = makeBaseTicker();
+    const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
+      timestamp: 2200,
+      instrument_ticker: {
+        option_pricing: {},
+      },
+    }, prev);
+
+    expect(next).not.toBeNull();
+    expect(next?.option_pricing).toEqual(prev.option_pricing);
+  });
+
+  it("preserves previous option_pricing when update sends option_pricing null", () => {
+    const prev = makeBaseTicker();
+    const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
+      timestamp: 2300,
+      instrument_ticker: {
+        option_pricing: null,
+      },
+    }, prev);
+
+    expect(next).not.toBeNull();
+    expect(next?.option_pricing).toEqual(prev.option_pricing);
+  });
 });

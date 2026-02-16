@@ -85,64 +85,76 @@ export function OptionsChain() {
       return parsed.expiry && parsed.expiry.toISOString().split("T")[0] === selectedExpiry;
     });
 
-    // Fetch tickers in batches of 5 to avoid overwhelming the API
-    const fetchBatch = async (instruments: typeof expiryInstruments) => {
-      for (let i = 0; i < instruments.length; i += 5) {
-        const batch = instruments.slice(i, i + 5);
-        await Promise.all(
-          batch.map(async (inst) => {
-            try {
-              const raw = await deriveClient.call<Record<string, unknown>>(
-                "public/get_ticker",
-                { instrument_name: inst.instrument_name }
-              );
-              if (raw) {
-                const rawStats = (raw.stats as Record<string, string>) || {};
-                const ticker: DeriveTicker = {
-                  instrument_type: raw.instrument_type as InstrumentType,
-                  instrument_name: raw.instrument_name as string,
-                  best_bid: (raw.best_bid_price as string) || "0",
-                  best_bid_amount: (raw.best_bid_amount as string) || "0",
-                  best_ask: (raw.best_ask_price as string) || "0",
-                  best_ask_amount: (raw.best_ask_amount as string) || "0",
-                  timestamp: raw.timestamp as number,
-                  mark_price: (raw.mark_price as string) || "0",
-                  index_price: (raw.index_price as string) || "0",
-                  min_price: (raw.min_price as string) || "0",
-                  max_price: (raw.max_price as string) || "0",
-                  option_pricing: (raw.option_pricing as OptionPricing) || null,
-                  stats: {
-                    contract_volume: rawStats.contract_volume || "0",
-                    num_trades: rawStats.num_trades || "0",
-                    open_interest: rawStats.open_interest || "0",
-                    high: rawStats.high || "0",
-                    low: rawStats.low || "0",
-                    percent_change: rawStats.percent_change || "0",
-                    usd_change: rawStats.usd_change || "0",
-                  },
-                  last: (raw.mark_price as string) || "0",
-                  change: rawStats.percent_change || "0",
-                  high: rawStats.high || "0",
-                  low: rawStats.low || "0",
-                  open_interest: rawStats.open_interest || "0",
-                  volume: rawStats.contract_volume || "0",
-                  volume_value: "0",
-                  best_bid_size: (raw.best_bid_amount as string) || "0",
-                  best_ask_size: (raw.best_ask_amount as string) || "0",
-                  funding_rate: "0",
-                };
-                useMarketStore.getState().updateTicker(inst.instrument_name, ticker);
-              }
-            } catch {
-              // Silently skip failed tickers
-            }
-          })
-        );
-      }
+    const instrumentsToFetch = expiryInstruments.filter((inst) => {
+      const existing = useMarketStore.getState().tickers.get(inst.instrument_name);
+      return !existing;
+    });
+
+    // Fetch with bounded concurrency for faster first paint without API overload.
+    const fetchConcurrent = async (instruments: typeof instrumentsToFetch) => {
+      const concurrency = 12;
+      let cursor = 0;
+      const workers = Array.from({ length: Math.min(concurrency, instruments.length) }, async () => {
+        while (cursor < instruments.length) {
+          const index = cursor++;
+          const inst = instruments[index];
+          if (!inst) continue;
+
+          try {
+            const raw = await deriveClient.call<Record<string, unknown>>(
+              "public/get_ticker",
+              { instrument_name: inst.instrument_name }
+            );
+            if (!raw) continue;
+
+            const rawStats = (raw.stats as Record<string, string>) || {};
+            const ticker: DeriveTicker = {
+              instrument_type: raw.instrument_type as InstrumentType,
+              instrument_name: raw.instrument_name as string,
+              best_bid: (raw.best_bid_price as string) || "0",
+              best_bid_amount: (raw.best_bid_amount as string) || "0",
+              best_ask: (raw.best_ask_price as string) || "0",
+              best_ask_amount: (raw.best_ask_amount as string) || "0",
+              timestamp: raw.timestamp as number,
+              mark_price: (raw.mark_price as string) || "0",
+              index_price: (raw.index_price as string) || "0",
+              min_price: (raw.min_price as string) || "0",
+              max_price: (raw.max_price as string) || "0",
+              option_pricing: (raw.option_pricing as OptionPricing) || null,
+              stats: {
+                contract_volume: rawStats.contract_volume || "0",
+                num_trades: rawStats.num_trades || "0",
+                open_interest: rawStats.open_interest || "0",
+                high: rawStats.high || "0",
+                low: rawStats.low || "0",
+                percent_change: rawStats.percent_change || "0",
+                usd_change: rawStats.usd_change || "0",
+              },
+              last: (raw.mark_price as string) || "0",
+              change: rawStats.percent_change || "0",
+              high: rawStats.high || "0",
+              low: rawStats.low || "0",
+              open_interest: rawStats.open_interest || "0",
+              volume: rawStats.contract_volume || "0",
+              volume_value: "0",
+              best_bid_size: (raw.best_bid_amount as string) || "0",
+              best_ask_size: (raw.best_ask_amount as string) || "0",
+              funding_rate: "0",
+            };
+            useMarketStore.getState().updateTicker(inst.instrument_name, ticker);
+          } catch {
+            // Silently skip failed tickers
+          }
+        }
+      });
+
+      await Promise.all(workers);
     };
 
-    fetchBatch(expiryInstruments).then(() => {
-      console.log(`[Options] Loaded tickers for ${expiryInstruments.length} instruments (${selectedExpiry})`);
+    fetchConcurrent(instrumentsToFetch).then(() => {
+      console.log(
+        `[Options] Loaded tickers for ${instrumentsToFetch.length}/${expiryInstruments.length} instruments (${selectedExpiry})`
+      );
     });
   }, [selectedExpiry, options]);
 
@@ -287,6 +299,10 @@ function OptionSide({
 }) {
   const op = ticker?.option_pricing;
   const isCall = side === "call";
+  const ivNum = op ? Number(op.iv) : NaN;
+  const deltaNum = op ? Number(op.delta) : NaN;
+  const ivLabel = Number.isFinite(ivNum) ? `${(ivNum * 100).toFixed(1)}%` : "—";
+  const deltaLabel = Number.isFinite(deltaNum) ? formatGreek(deltaNum, 3) : "—";
 
   return (
     <div
@@ -313,10 +329,10 @@ function OptionSide({
         {ticker ? formatPrice(ticker.best_ask, 2) : "—"}
       </div>
       <div className={cn("w-12 font-mono-nums text-text-secondary", isCall ? "text-right" : "")}>
-        {op ? (parseFloat(op.iv) * 100).toFixed(1) + "%" : "—"}
+        {ivLabel}
       </div>
       <div className={cn("w-12 font-mono-nums text-text-secondary", isCall ? "text-right" : "")}>
-        {op ? formatGreek(op.delta, 3) : "—"}
+        {deltaLabel}
       </div>
       <div className={cn("flex-1 font-mono-nums text-text-muted", isCall ? "text-right" : "")}>
         {ticker?.open_interest ? formatPrice(ticker.open_interest, 0) : "—"}

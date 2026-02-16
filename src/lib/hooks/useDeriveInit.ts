@@ -72,7 +72,7 @@ export function useDeriveInit() {
         if (cancelled) return;
         if (!deriveWallet) {
           accountStore.setError(
-            "No Derive account for this wallet. Create one at derive.xyz"
+            "No Derive account for this wallet. Create one in the Deposit tab."
           );
           accountStore.setLoadingAccount(false);
           return;

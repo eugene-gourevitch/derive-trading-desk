@@ -29,6 +29,7 @@ interface MarketState {
   setInstruments: (instruments: DeriveInstrument[]) => void;
   setLoadingInstruments: (loading: boolean) => void;
   updateTicker: (instrument: string, ticker: DeriveTicker) => void;
+  updateTickersBulk: (updates: Array<[instrument: string, ticker: DeriveTicker]>) => void;
   updateOrderBook: (instrument: string, book: DeriveOrderBook) => void;
   addTrade: (instrument: string, trade: DeriveTrade) => void;
   setTrades: (instrument: string, trades: DeriveTrade[]) => void;
@@ -61,6 +62,15 @@ export const useMarketStore = create<MarketState>()((set, get) => ({
   updateTicker: (instrument, ticker) => {
     const tickers = new Map(get().tickers);
     tickers.set(instrument, ticker);
+    set({ tickers });
+  },
+
+  updateTickersBulk: (updates) => {
+    if (updates.length === 0) return;
+    const tickers = new Map(get().tickers);
+    for (const [instrument, ticker] of updates) {
+      tickers.set(instrument, ticker);
+    }
     set({ tickers });
   },
 

@@ -6,6 +6,7 @@ import { useUiStore } from "@/lib/stores/uiStore";
 import { useTickerSubscriptions } from "@/lib/hooks/useSubscription";
 import { deriveClient } from "@/lib/derive/client";
 import { parseInstrumentName, formatExpiryCompact, daysToExpiry } from "@/lib/derive/instruments";
+import { TICKER_STALE_UI_MS } from "@/lib/derive/constants";
 import { formatPrice, formatGreek } from "@/lib/utils/formatting";
 import { cn } from "@/lib/utils/cn";
 import type { DeriveTicker, OptionPricing, InstrumentType } from "@/lib/derive/types";
@@ -27,7 +28,33 @@ export function OptionsChain() {
     () => instrumentsList.filter((i) => i.instrument_type === "option" && i.option_details?.index === `${underlying}-USD`),
     [instrumentsList, underlying]
   );
-  const tickers = useMarketStore((s) => s.tickers);
+
+  const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
+
+  // Instrument names for the selected expiry (for real-time subscriptions)
+  const selectedExpiryInstrumentNames = useMemo(() => {
+    if (!selectedExpiry) return [];
+    return options
+      .filter((inst) => {
+        const parsed = parseInstrumentName(inst.instrument_name);
+        return parsed.expiry && parsed.expiry.toISOString().split("T")[0] === selectedExpiry;
+      })
+      .map((inst) => inst.instrument_name);
+  }, [options, selectedExpiry]);
+
+  // Only re-render when tickers for the selected expiry change (not on unrelated instrument updates)
+  const tickersSliceRef = useRef<Map<string, DeriveTicker>>(new Map());
+  const tickers = useMarketStore((s) => {
+    const names = selectedExpiryInstrumentNames;
+    const prev = tickersSliceRef.current;
+    let same = prev.size === names.length;
+    if (same) for (const n of names) { if (s.tickers.get(n) !== prev.get(n)) { same = false; break; } }
+    if (same) return prev;
+    const next = new Map<string, DeriveTicker>();
+    for (const n of names) { const t = s.tickers.get(n); if (t) next.set(n, t); }
+    tickersSliceRef.current = next;
+    return next;
+  });
 
   // Group by expiry
   const expiries = useMemo(() => {
@@ -52,19 +79,6 @@ export function OptionsChain() {
       .map(([key, val]) => ({ key, ...val }));
   }, [options]);
 
-  const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
-
-  // Instrument names for the selected expiry (for real-time subscriptions)
-  const selectedExpiryInstrumentNames = useMemo(() => {
-    if (!selectedExpiry) return [];
-    return options
-      .filter((inst) => {
-        const parsed = parseInstrumentName(inst.instrument_name);
-        return parsed.expiry && parsed.expiry.toISOString().split("T")[0] === selectedExpiry;
-      })
-      .map((inst) => inst.instrument_name);
-  }, [options, selectedExpiry]);
-
   useTickerSubscriptions(selectedExpiryInstrumentNames);
 
   // Auto-select first expiry when expiries become available
@@ -74,11 +88,17 @@ export function OptionsChain() {
     }
   }, [expiries, selectedExpiry]);
 
+  // Track partial load: requested vs loaded count for selected expiry
+  const [fetchRequestedCount, setFetchRequestedCount] = useState<number | null>(null);
+
   // Fetch tickers for option instruments in the selected expiry (initial load)
   const fetchedExpiryRef = useRef<string | null>(null);
+  const inFlightExpiryRef = useRef<string | null>(null);
   useEffect(() => {
     if (!selectedExpiry || fetchedExpiryRef.current === selectedExpiry) return;
+    if (inFlightExpiryRef.current === selectedExpiry) return; // Dedupe: already fetching this expiry
     fetchedExpiryRef.current = selectedExpiry;
+    inFlightExpiryRef.current = selectedExpiry;
 
     const expiryInstruments = options.filter((inst) => {
       const parsed = parseInstrumentName(inst.instrument_name);
@@ -89,6 +109,8 @@ export function OptionsChain() {
       const existing = useMarketStore.getState().tickers.get(inst.instrument_name);
       return !existing;
     });
+
+    setFetchRequestedCount(instrumentsToFetch.length);
 
     // Fetch with bounded concurrency for faster first paint without API overload.
     const fetchConcurrent = async (instruments: typeof instrumentsToFetch) => {
@@ -152,11 +174,39 @@ export function OptionsChain() {
     };
 
     fetchConcurrent(instrumentsToFetch).then(() => {
+      inFlightExpiryRef.current = null;
+      setFetchRequestedCount(null); // Clear so we don't show partial after load completes
       console.log(
         `[Options] Loaded tickers for ${instrumentsToFetch.length}/${expiryInstruments.length} instruments (${selectedExpiry})`
       );
     });
   }, [selectedExpiry, options]);
+
+  // Stale and partial-load indicators for selected expiry
+  const selectedExpiryInstruments = useMemo(() => {
+    if (!selectedExpiry) return [];
+    return options.filter((inst) => {
+      const parsed = parseInstrumentName(inst.instrument_name);
+      return parsed.expiry && parsed.expiry.toISOString().split("T")[0] === selectedExpiry;
+    });
+  }, [options, selectedExpiry]);
+
+  const tickerFreshness = useMemo(() => {
+    const now = Date.now();
+    let maxAge = 0;
+    for (const inst of selectedExpiryInstruments) {
+      const t = tickers.get(inst.instrument_name);
+      if (t?.timestamp) maxAge = Math.max(maxAge, now - t.timestamp);
+    }
+    return { maxAge, isStale: maxAge > TICKER_STALE_UI_MS };
+  }, [tickers, selectedExpiryInstruments]);
+
+  const partialLoad = useMemo(() => {
+    if (fetchRequestedCount == null || fetchRequestedCount === 0) return null;
+    const loaded = selectedExpiryInstruments.filter((inst) => tickers.has(inst.instrument_name)).length;
+    if (loaded >= fetchRequestedCount) return null;
+    return { loaded, requested: fetchRequestedCount };
+  }, [fetchRequestedCount, selectedExpiryInstruments, tickers]);
 
   // Build strike grid for selected expiry
   const strikes = useMemo(() => {
@@ -205,6 +255,21 @@ export function OptionsChain() {
 
   return (
     <div className="flex h-full flex-col text-xs">
+      {/* Stale / partial-load indicators */}
+      {(tickerFreshness.isStale || partialLoad) && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border-subtle px-2 py-1 text-[10px]">
+          {tickerFreshness.isStale && (
+            <span className="text-amber-500" title={`Quotes older than ${(TICKER_STALE_UI_MS / 1000).toFixed(0)}s`}>
+              Stale
+            </span>
+          )}
+          {partialLoad && (
+            <span className="text-text-muted" title="Some quotes failed to load">
+              Partial ({partialLoad.loaded}/{partialLoad.requested})
+            </span>
+          )}
+        </div>
+      )}
       {/* Expiry Tabs */}
       <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-border-subtle px-2 py-1">
         {expiries.map((exp) => (

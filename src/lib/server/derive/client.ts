@@ -148,11 +148,19 @@ export class BackendDeriveClient {
   }
 
   async createAccount(wallet: string): Promise<CreateAccountResult> {
-    const result = await this.call<CreateAccountResult>(
-      "public/create_account",
-      { wallet }
-    );
-    return result;
+    try {
+      const result = await this.call<CreateAccountResult>(
+        "private/create_account",
+        { wallet }
+      );
+      return result;
+    } catch (error) {
+      // Some Derive environments no longer expose create_account; create_subaccount can still work.
+      if (error instanceof ServerDeriveApiError && error.statusCode === 404) {
+        return { status: "exists", wallet };
+      }
+      throw error;
+    }
   }
 
   async getSubaccounts(): Promise<{ subaccounts: SubaccountInfo[] }> {

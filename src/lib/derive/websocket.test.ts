@@ -51,10 +51,12 @@ function makeBaseTicker(overrides: Partial<DeriveTicker> = {}): DeriveTicker {
 }
 
 describe("normalizeTickerSlimUpdate", () => {
+  const recentTs = () => Date.now() - 1000; // Within TTL, not future
+
   it("preserves previous fields when slim update is partial", () => {
-    const prev = makeBaseTicker();
+    const prev = makeBaseTicker({ timestamp: recentTs() - 100 });
     const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
-      timestamp: 1100,
+      timestamp: recentTs(),
       instrument_ticker: {
         b: "10.2",
         a: "11.3",
@@ -70,9 +72,9 @@ describe("normalizeTickerSlimUpdate", () => {
   });
 
   it("returns null when update timestamp is older than previous ticker", () => {
-    const prev = makeBaseTicker({ timestamp: 2000 });
+    const prev = makeBaseTicker({ timestamp: recentTs() + 100 });
     const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
-      timestamp: 1999,
+      timestamp: recentTs(),
       instrument_ticker: {
         b: "9.9",
         a: "10.1",
@@ -83,9 +85,9 @@ describe("normalizeTickerSlimUpdate", () => {
   });
 
   it("maps compact option_pricing fields from ticker_slim updates", () => {
-    const prev = makeBaseTicker();
+    const prev = makeBaseTicker({ timestamp: recentTs() - 100 });
     const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
-      timestamp: 2100,
+      timestamp: recentTs(),
       instrument_ticker: {
         option_pricing: {
           d: "0.25",
@@ -118,9 +120,9 @@ describe("normalizeTickerSlimUpdate", () => {
   });
 
   it("preserves previous option_pricing when update has empty option_pricing payload", () => {
-    const prev = makeBaseTicker();
+    const prev = makeBaseTicker({ timestamp: recentTs() - 100 });
     const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
-      timestamp: 2200,
+      timestamp: recentTs(),
       instrument_ticker: {
         option_pricing: {},
       },
@@ -131,9 +133,9 @@ describe("normalizeTickerSlimUpdate", () => {
   });
 
   it("preserves previous option_pricing when update sends option_pricing null", () => {
-    const prev = makeBaseTicker();
+    const prev = makeBaseTicker({ timestamp: recentTs() - 100 });
     const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
-      timestamp: 2300,
+      timestamp: recentTs(),
       instrument_ticker: {
         option_pricing: null,
       },
@@ -141,5 +143,23 @@ describe("normalizeTickerSlimUpdate", () => {
 
     expect(next).not.toBeNull();
     expect(next?.option_pricing).toEqual(prev.option_pricing);
+  });
+
+  it("returns null when update timestamp is beyond stale TTL", () => {
+    const prev = makeBaseTicker({ timestamp: Date.now() - 120_000 });
+    const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
+      timestamp: Date.now() - 90_000,
+      instrument_ticker: { b: "1", a: "2" },
+    }, prev);
+    expect(next).toBeNull();
+  });
+
+  it("returns null when update timestamp is in the future beyond skew", () => {
+    const prev = makeBaseTicker({ timestamp: recentTs() - 100 });
+    const next = normalizeTickerSlimUpdate("ETH-31DEC26-3000-C", {
+      timestamp: Date.now() + 10_000,
+      instrument_ticker: { b: "1", a: "2" },
+    }, prev);
+    expect(next).toBeNull();
   });
 });

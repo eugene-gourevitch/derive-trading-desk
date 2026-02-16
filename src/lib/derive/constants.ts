@@ -37,6 +37,16 @@ export const WS_HEARTBEAT_INTERVAL_MS = 10_000;
 export const WS_RECONNECT_BASE_MS = 1_000;
 export const WS_RECONNECT_MAX_MS = 30_000;
 
+// Quote correctness: reject ticker updates older than this (ms)
+export const TICKER_STALE_TTL_MS = 60_000;
+// UI: show "stale" when ticker age exceeds this (ms)
+export const TICKER_STALE_UI_MS = 30_000;
+// Subscription ack: retry subscribe if no response within this (ms)
+export const WS_SUBSCRIBE_ACK_TIMEOUT_MS = 5_000;
+
+// Backpressure: max buffered WS updates before coalescing/drop
+export const WS_UPDATE_BUFFER_MAX = 2000;
+
 // UI defaults
 export const DEFAULT_ORDERBOOK_DEPTH = 20;
 export const DEFAULT_TRADES_COUNT = 50;

@@ -2,12 +2,24 @@ import {
   WS_HEARTBEAT_INTERVAL_MS,
   WS_RECONNECT_BASE_MS,
   WS_RECONNECT_MAX_MS,
+  TICKER_STALE_TTL_MS,
+  WS_SUBSCRIBE_ACK_TIMEOUT_MS,
+  WS_UPDATE_BUFFER_MAX,
   DERIVE_ENVIRONMENTS,
   type DeriveEnvironment,
 } from "./constants";
 import type { DeriveTicker, JsonRpcResponse, OptionPricing } from "./types";
 import { useMarketStore } from "../stores/marketStore";
 import { useUiStore } from "../stores/uiStore";
+import {
+  recordQuoteMessageReceived,
+  recordQuoteUpdatesDroppedByBackpressure,
+  recordQuoteDeadLetterChannel,
+  recordQuoteReconnectAttempt,
+  recordQuoteSubscribeAckRetry,
+  recordQuoteTickerUpdatesApplied,
+} from "../observability/quote-metrics";
+import { quotePipelineFlags } from "../features/flags";
 
 type MessageHandler = (data: unknown) => void;
 
@@ -80,10 +92,19 @@ function normalizeOptionPricing(
   };
 }
 
+/** Dead-letter count for malformed ticker_slim channels (for metrics). */
+export let quotePipelineDeadLetterCount = 0;
+
 function extractTickerSlimInstrument(channel: string): string | null {
   if (!channel.startsWith("ticker_slim.")) return null;
   const parts = channel.split(".");
-  return parts[1] ?? null;
+  // Expect ticker_slim.{instrument}.{interval} (at least 3 parts)
+  if (parts.length < 3 || !parts[1] || parts[1].length === 0) {
+    quotePipelineDeadLetterCount += 1;
+    recordQuoteDeadLetterChannel();
+    return null;
+  }
+  return parts[1];
 }
 
 export function normalizeTickerSlimUpdate(
@@ -97,8 +118,15 @@ export function normalizeTickerSlimUpdate(
 
   const rawTimestamp = (wrapper.timestamp as number | undefined) ?? (t.t as number | undefined);
   const timestamp = rawTimestamp ?? previous?.timestamp ?? Date.now();
+  // Monotonic: reject out-of-order
   if (previous && timestamp < previous.timestamp) {
     return null;
+  }
+  // Stale TTL and future skew (guarded by feature flag for rollback)
+  if (quotePipelineFlags.strictStaleGuard) {
+    const now = Date.now();
+    if (timestamp < now - TICKER_STALE_TTL_MS) return null;
+    if (timestamp > now + 5_000) return null;
   }
 
   const previousStats = previous?.stats;
@@ -196,6 +224,16 @@ class DeriveWebSocketManager {
   // rAF batching for high-freq updates
   private updateBuffer: Array<{ channel: string; data: unknown }> = [];
   private rafScheduled = false;
+
+  // Subscription ack tracking: id -> { channel, timeout, retried }
+  private pendingSubscribeAcks = new Map<
+    number,
+    { channel: string; timeout: ReturnType<typeof setTimeout>; retried?: boolean }
+  >();
+
+  // Reconnect verification: channels we've received data for since connect
+  private receivedChannelsSinceConnect = new Set<string>();
+  private reconnectVerifyTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Debounced disconnect for React Strict Mode resilience
   private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -373,6 +411,7 @@ class DeriveWebSocketManager {
     this.ws.onopen = () => {
       console.log("[WS] Connected to", url);
       this.reconnectAttempt = 0;
+      this.receivedChannelsSinceConnect = new Set<string>();
       this.startHeartbeat();
 
       // Authenticate if credentials available
@@ -382,6 +421,7 @@ class DeriveWebSocketManager {
         // Public-only connection
         useUiStore.getState().setWsConnected(true);
         this.resubscribeAll();
+        this.scheduleReconnectVerify();
       }
     };
 
@@ -424,6 +464,7 @@ class DeriveWebSocketManager {
 
       // Re-subscribe to all channels
       this.resubscribeAll();
+      this.scheduleReconnectVerify();
     } catch (err) {
       console.error("[WS] Authentication failed:", err);
       this.isAuthenticated = false;
@@ -439,17 +480,26 @@ class DeriveWebSocketManager {
     }
 
     // Handle RPC responses (has id)
-    if (data.id && this.pendingRequests.has(data.id)) {
-      const pending = this.pendingRequests.get(data.id)!;
-      clearTimeout(pending.timeout);
-      this.pendingRequests.delete(data.id);
+    if (data.id !== undefined && data.id !== null) {
+      if (this.pendingRequests.has(data.id)) {
+        const pending = this.pendingRequests.get(data.id)!;
+        clearTimeout(pending.timeout);
+        this.pendingRequests.delete(data.id);
 
-      if (data.error) {
-        pending.reject(new Error(data.error.message));
-      } else {
-        pending.resolve(data.result);
+        if (data.error) {
+          pending.reject(new Error(data.error.message));
+        } else {
+          pending.resolve(data.result);
+        }
+        return;
       }
-      return;
+      // Subscribe ack: server confirms subscription
+      const ack = this.pendingSubscribeAcks.get(data.id as number);
+      if (ack && !(data as { error?: unknown }).error) {
+        clearTimeout(ack.timeout);
+        this.pendingSubscribeAcks.delete(data.id as number);
+        return;
+      }
     }
 
     // Handle subscription updates (has method = "subscription")
@@ -460,7 +510,8 @@ class DeriveWebSocketManager {
         data?: unknown;
       } | undefined;
       if (params?.channel && params?.data) {
-        // Buffer for rAF batching
+        recordQuoteMessageReceived();
+        this.applyBackpressure();
         this.updateBuffer.push({
           channel: params.channel,
           data: params.data,
@@ -468,6 +519,27 @@ class DeriveWebSocketManager {
         this.scheduleFlush();
       }
     }
+  }
+
+  /**
+   * Backpressure: if buffer exceeds max, coalesce ticker_slim by instrument (keep latest) and trim.
+   */
+  private applyBackpressure(): void {
+    if (this.updateBuffer.length < WS_UPDATE_BUFFER_MAX) return;
+    const before = this.updateBuffer.length;
+    const tickerByInstrument = new Map<string, { channel: string; data: unknown }>();
+    const other: Array<{ channel: string; data: unknown }> = [];
+    for (const entry of this.updateBuffer) {
+      if (entry.channel.startsWith("ticker_slim.")) {
+        const inst = extractTickerSlimInstrument(entry.channel);
+        if (inst) tickerByInstrument.set(inst, entry);
+      } else {
+        other.push(entry);
+      }
+    }
+    const coalesced = [...other, ...tickerByInstrument.values()];
+    this.updateBuffer = coalesced.slice(-Math.floor(WS_UPDATE_BUFFER_MAX / 2));
+    recordQuoteUpdatesDroppedByBackpressure(before - this.updateBuffer.length);
   }
 
   /**
@@ -485,6 +557,8 @@ class DeriveWebSocketManager {
       const tickerUpdates = new Map<string, DeriveTicker>();
 
       for (const { channel, data } of buffer) {
+        this.receivedChannelsSinceConnect.add(channel);
+
         // Dispatch to registered handlers
         const handlers = this.subscriptions.get(channel);
         if (handlers) {
@@ -513,6 +587,7 @@ class DeriveWebSocketManager {
       }
 
       if (tickerUpdates.size > 0) {
+        recordQuoteTickerUpdatesApplied(tickerUpdates.size);
         store.updateTickersBulk(Array.from(tickerUpdates.entries()));
       }
     });
@@ -558,11 +633,23 @@ class DeriveWebSocketManager {
     }
   }
 
-  private sendSubscribe(channel: string): void {
+  private sendSubscribe(channel: string, isRetry = false): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const id = this.nextId++;
+    const timeout = setTimeout(() => {
+      const entry = this.pendingSubscribeAcks.get(id);
+      this.pendingSubscribeAcks.delete(id);
+      // Retry subscribe once if no ack and not already a retry
+      if (entry && !entry.retried && this.subscriptions.has(channel) && this.ws?.readyState === WebSocket.OPEN) {
+        recordQuoteSubscribeAckRetry();
+        console.warn("[WS] Subscribe ack timeout, retrying:", channel);
+        this.sendSubscribe(channel, true);
+      }
+    }, WS_SUBSCRIBE_ACK_TIMEOUT_MS);
+    this.pendingSubscribeAcks.set(id, { channel, timeout, retried: isRetry });
     const msg = {
       jsonrpc: "2.0",
-      id: this.nextId++,
+      id,
       method: "subscribe",
       params: { channels: [channel] },
     };
@@ -588,6 +675,20 @@ class DeriveWebSocketManager {
     for (const channel of channels) {
       this.sendSubscribe(channel);
     }
+  }
+
+  /** Run 15s after connect: resubscribe any channel we didn't receive data on. */
+  private scheduleReconnectVerify(): void {
+    if (this.reconnectVerifyTimer) clearTimeout(this.reconnectVerifyTimer);
+    this.reconnectVerifyTimer = setTimeout(() => {
+      this.reconnectVerifyTimer = null;
+      for (const channel of this.subscriptions.keys()) {
+        if (!this.receivedChannelsSinceConnect.has(channel) && this.ws?.readyState === WebSocket.OPEN) {
+          console.warn("[WS] Reconnect verify: no data for channel, resubscribing:", channel);
+          this.sendSubscribe(channel);
+        }
+      }
+    }, 15_000);
   }
 
   private startHeartbeat(): void {
@@ -626,6 +727,7 @@ class DeriveWebSocketManager {
       WS_RECONNECT_MAX_MS
     );
     this.reconnectAttempt++;
+    recordQuoteReconnectAttempt();
 
     console.log(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
 
@@ -645,6 +747,14 @@ class DeriveWebSocketManager {
       clearTimeout(this.disconnectTimer);
       this.disconnectTimer = null;
     }
+    if (this.reconnectVerifyTimer) {
+      clearTimeout(this.reconnectVerifyTimer);
+      this.reconnectVerifyTimer = null;
+    }
+    for (const [, entry] of this.pendingSubscribeAcks) {
+      clearTimeout(entry.timeout);
+    }
+    this.pendingSubscribeAcks.clear();
     // Clear pending requests
     for (const [, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout);

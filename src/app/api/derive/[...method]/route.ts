@@ -59,7 +59,18 @@ export async function POST(
       body: JSON.stringify(body),
     });
 
-    const data = await response.json();
+    const raw = await response.text();
+    let data: unknown;
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = {
+        error: {
+          code: response.status,
+          message: raw || response.statusText || "Upstream non-JSON response",
+        },
+      };
+    }
 
     return NextResponse.json(data, { status: response.status });
   } catch (error) {

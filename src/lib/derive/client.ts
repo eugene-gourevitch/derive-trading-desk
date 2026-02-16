@@ -151,10 +151,18 @@ export class DeriveClient {
   }
 
   async createAccount(wallet: string) {
-    return this.call<{ status: "created" | "exists"; wallet: string }>(
-      "public/create_account",
-      { wallet }
-    );
+    try {
+      return await this.call<{ status: "created" | "exists"; wallet: string }>(
+        "private/create_account",
+        { wallet }
+      );
+    } catch (error) {
+      // Some Derive environments no longer expose create_account; create_subaccount can still work.
+      if (error instanceof DeriveApiError && error.message.includes("HTTP 404")) {
+        return { status: "exists", wallet };
+      }
+      throw error;
+    }
   }
 
   // ── Private Endpoints ──
